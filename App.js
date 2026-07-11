@@ -13,6 +13,8 @@ import {
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import Constants from 'expo-constants';
+import { TextInput } from 'react-native';
+import { supabase } from './lib/supabase';
 import { useAudioPlayer } from 'expo-audio';
 import {
   useFonts,
@@ -693,7 +695,20 @@ export default function App() {
     Fraunces_900Black_Italic,
   });
 
+  const [session, setSession] = useState(null);
+  const [authReady, setAuthReady] = useState(false);
   const [entered, setEntered] = useState(false);
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session);
+      setAuthReady(true);
+    });
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, s) => {
+      setSession(s);
+    });
+    return () => listener.subscription.unsubscribe();
+  }, []);
   const [activePlayerId, setActivePlayerId] = useState('p1');
   const [muted, setMuted] = useState(false);
   const mutedRef = useRef(false);
@@ -822,7 +837,7 @@ export default function App() {
 
   const prompt = PROMPTS[getPromptIndexForDay(getDayNumber(), skipOffset)];
 
-  if (!fontsLoaded) {
+  if (!fontsLoaded || !authReady) {
     return (
       <View style={[styles.loading]}>
         <ActivityIndicator color={GOLD} />
@@ -901,7 +916,10 @@ export default function App() {
   // --- Route to the right page for THIS player ---
   let page;
   let step;
-  if (!entered) {
+  if (!session) {
+    page = <AuthPage />;
+    step = -1;
+  } else if (!entered) {
     page = <LandingPage onEnter={() => setEntered(true)} />;
     step = -1;
   } else if (skipRequest && skipRequest.requestedBy !== activePlayerId) {
@@ -1322,6 +1340,114 @@ function SeesawButton({ label, onPress, disabled }) {
         </TouchableOpacity>
       </Animated.View>
     </Animated.View>
+  );
+}
+
+// --- Page -1: SIGN IN --------------------------------------------------------------------
+
+function AuthPage() {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [mode, setMode] = useState('signin'); // 'signin' | 'signup'
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [info, setInfo] = useState(null);
+
+  const submit = async () => {
+    setBusy(true);
+    setError(null);
+    setInfo(null);
+
+    if (mode === 'signin') {
+      const { error: err } = await supabase.auth.signInWithPassword({
+        email: email.trim(),
+        password,
+      });
+      if (err) setError(err.message);
+      // On success, onAuthStateChange fires and the app routes in.
+    } else {
+      const { data, error: err } = await supabase.auth.signUp({
+        email: email.trim(),
+        password,
+      });
+      if (err) {
+        setError(err.message);
+      } else if (data.session) {
+        // Auto-confirm is on: we're signed in; the app routes in by itself.
+      } else {
+        // Account created but no session (email confirmation pending).
+        setInfo('Account created! Sign in below.');
+        setMode('signin');
+        setPassword('');
+      }
+    }
+    setBusy(false);
+  };
+
+  return (
+    <View style={styles.landing}>
+      <View style={styles.landingCenter}>
+        <FadeInUp delay={0}>
+          <Text style={styles.landingTitle}>Duet</Text>
+        </FadeInUp>
+        <DrawnUnderline color={GOLD} delay={400} />
+        <FadeInUp delay={250}>
+          <Text style={styles.landingTagline}>
+            {mode === 'signin' ? 'Welcome back.' : 'Create your account.'}
+          </Text>
+        </FadeInUp>
+
+        <FadeInUp delay={400}>
+          <TextInput
+            style={styles.authInput}
+            placeholder="email"
+            placeholderTextColor={DIM}
+            autoCapitalize="none"
+            keyboardType="email-address"
+            value={email}
+            onChangeText={setEmail}
+          />
+          <TextInput
+            style={styles.authInput}
+            placeholder="password"
+            placeholderTextColor={DIM}
+            secureTextEntry
+            value={password}
+            onChangeText={setPassword}
+          />
+        </FadeInUp>
+
+        {info && (
+          <FadeInUp delay={0}>
+            <Text style={styles.authInfo}>{info}</Text>
+          </FadeInUp>
+        )}
+        {error && (
+          <FadeInUp delay={0}>
+            <Text style={styles.authError}>{error}</Text>
+          </FadeInUp>
+        )}
+
+        <FadeInUp delay={520}>
+          <SeesawButton
+            label={busy ? 'ONE MOMENT…' : mode === 'signin' ? 'SIGN IN' : 'SIGN UP'}
+            disabled={busy || !email || !password}
+            onPress={submit}
+          />
+        </FadeInUp>
+
+        <FadeInUp delay={650}>
+          <TouchableOpacity
+            style={styles.backLink}
+            onPress={() => setMode((m) => (m === 'signin' ? 'signup' : 'signin'))}
+          >
+            <Text style={styles.backLinkText}>
+              {mode === 'signin' ? 'New here? Create an account' : 'Have an account? Sign in'}
+            </Text>
+          </TouchableOpacity>
+        </FadeInUp>
+      </View>
+    </View>
   );
 }
 
@@ -1977,6 +2103,32 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     lineHeight: 26,
     marginBottom: 36,
+  },
+  authInput: {
+    fontFamily: 'Fraunces_600SemiBold',
+    fontSize: 16,
+    color: CHALK,
+    borderWidth: 1.5,
+    borderColor: LINE,
+    borderRadius: 16,
+    backgroundColor: RAISED,
+    paddingHorizontal: 18,
+    paddingVertical: 14,
+    marginBottom: 12,
+  },
+  authInfo: {
+    fontFamily: 'Fraunces_600SemiBold',
+    fontSize: 13,
+    color: SELECT_GREEN,
+    textAlign: 'center',
+    marginBottom: 14,
+  },
+  authError: {
+    fontFamily: 'Fraunces_600SemiBold',
+    fontSize: 13,
+    color: '#ff8fa0',
+    textAlign: 'center',
+    marginBottom: 14,
   },
   landingFooter: {
     fontSize: 12,
