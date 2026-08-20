@@ -11,6 +11,7 @@ import {
   View,
 } from 'react-native';
 import { supabase } from './lib/supabase';
+import { registerForPushNotifications } from './lib/pushNotifications';
 import { useAudioPlayer, setAudioModeAsync } from 'expo-audio';
 import {
   useFonts,
@@ -154,6 +155,13 @@ export default function App() {
     return { me: mine, partner: theirs };
   }, [couple.members, myId]);
 
+  // Register for push once paired — best-effort, see lib/pushNotifications.js.
+  useEffect(() => {
+    if (couple.status === 'paired' && myId) {
+      registerForPushNotifications(myId);
+    }
+  }, [couple.status, myId]);
+
   // --- Audio (unchanged from Phase 1) -------------------------------------------
 
   const [muted, setMuted] = useState(false);
@@ -270,11 +278,14 @@ export default function App() {
     try {
       const today = getLocalDateString();
 
-      const { data: rpcData, error: rpcErr } = await supabase.rpc('start_todays_round', {
+      // One round trip: the round row, custom prompt (if any), who's
+      // submitted, full submissions (once revealed), and the latest skip
+      // request all come back together. See sql/07_get_round_state.sql.
+      const { data, error: rpcErr } = await supabase.rpc('get_round_state', {
         p_today: today,
       });
       if (rpcErr) throw rpcErr;
-      const r = Array.isArray(rpcData) ? rpcData[0] : rpcData;
+      const r = data?.round;
       if (!r) throw new Error('No round returned');
 
       // Detect a question change (first load, midnight, or an applied skip).
@@ -283,45 +294,16 @@ export default function App() {
       const isFirstLoad = roundKeyRef.current === null;
       roundKeyRef.current = newKey;
 
-      // Custom prompt (Author Night) content, if this round uses one.
-      let custom = null;
-      if (r.custom_prompt_id) {
-        const { data: cp } = await supabase
-          .from('custom_prompts')
-          .select('id, question, options, author_id')
-          .eq('id', r.custom_prompt_id)
-          .single();
-        custom = cp ?? null;
-      }
+      const custom = data.custom_prompt ?? null;
 
-      // Who has submitted? Read the round_progress view — never the raw
-      // submissions table while the round is open (no peeking).
-      const { data: progress } = await supabase
-        .from('round_progress')
-        .select('user_id')
-        .eq('round_id', r.id);
-      const submittedIds = new Set((progress ?? []).map((p) => p.user_id));
+      const submittedIds = new Set(data.submitted_user_ids ?? []);
 
-      // Full submissions only once revealed — server has scored them by then.
       let subs = null;
-      if (r.status === 'revealed') {
-        const { data: rows } = await supabase
-          .from('submissions')
-          .select('user_id, answer, prediction, wager, called_it, points')
-          .eq('round_id', r.id);
-        if (rows?.length === 2) {
-          subs = Object.fromEntries(rows.map((row) => [row.user_id, row]));
-        }
+      if (r.status === 'revealed' && data.submissions?.length === 2) {
+        subs = Object.fromEntries(data.submissions.map((row) => [row.user_id, row]));
       }
 
-      // Latest skip request for this round (any status).
-      const { data: skips } = await supabase
-        .from('skip_requests')
-        .select('id, requested_by, status, requested_at')
-        .eq('round_id', r.id)
-        .order('requested_at', { ascending: false })
-        .limit(1);
-      const latestSkip = skips?.[0] ?? null;
+      const latestSkip = data.latest_skip_request ?? null;
 
       // Notices from state transitions.
       const prevSkip = prevSkipRef.current;
